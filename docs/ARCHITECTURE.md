@@ -1,117 +1,70 @@
 # Arquitectura de NEXA
 
-## Principios
+## Contexto de ejecución
 
-1. El contenido y las personas tienen prioridad visual sobre el producto.
-2. La seguridad y la privacidad se aplican en el servidor, no se delegan a la interfaz.
-3. Las fronteras de dominio y contratos estables preceden a la extracción de microservicios.
-4. Los medios se almacenan fuera de PostgreSQL; la base conserva metadatos y claves de objetos.
-5. Escalabilidad y disponibilidad son objetivos medibles mediante SLO, pruebas de carga y operación, no propiedades de una lista de tecnologías.
-
-## Estado actual
+NEXA se ejecuta como monolito modular NestJS para conservar operaciones transaccionales entre identidad, publicaciones y grafo social. La interfaz Next.js consume contratos REST con prefijo `/api/v1`; PostgreSQL es fuente de verdad, Redis mantiene contadores de rate limit y sesiones autorizadas, y S3/MinIO almacena objetos multimedia.
 
 ```text
-Navegador
-  └── Next.js / React
-        ├── UI de feed con fixture local (estado volátil)
-        └── API client pendiente
-
-NestJS /api/v1
-  ├── Helmet y CORS por origen
-  ├── Swagger /docs
-  └── health
-
-Entorno local Docker
-  ├── PostgreSQL 17 — esquema inicial y cuentas de muestra
-  ├── Redis 7 — aprovisionado, sin consumidores todavía
-  └── MinIO — aprovisionado, sin cliente S3/pipeline todavía
+Browser ── HTTPS ── Next.js
+                       │ REST + access JWT / refresh cookie
+                       ▼
+                 NestJS /api/v1
+                 ├── auth + sesiones + mail
+                 ├── perfiles + posts + interacciones
+                 ├── validación / autorización / auditoría
+                 ├── Redis (rate limit y caché de sesión)
+                 ├── PostgreSQL (datos transaccionales)
+                 └── S3-compatible (imágenes y URLs firmadas)
 ```
 
-El Compose ayuda a reproducir el entorno de desarrollo; **no** constituye una arquitectura HA ni el API actual escribe en PostgreSQL, Redis o MinIO.
+Docker Compose define el entorno de desarrollo y sus health checks. CI ejecuta lint, compilación, tests de unidad e integración y build de contenedores.
 
-## Dominios objetivo
+## Límites de módulos
 
-| Dominio | Responsabilidad | Persistencia / eventos previstos |
+| Módulo | Responsabilidad actual | Dependencias |
 |---|---|---|
-| Identity & Access | registro, OAuth, MFA, sesiones y dispositivos | PostgreSQL, hash Argon2id, eventos de sesión |
-| Profiles & Graph | perfiles, seguimiento, bloqueo, privacidad | PostgreSQL; proyecciones Redis |
-| Publishing & Media | borradores, posts, metadata, pipeline de medios | PostgreSQL, S3/MinIO, BullMQ |
-| Feed & Discovery | ranking por señales, recencia, grafo y preferencias | PostgreSQL como fuente; Redis/OpenSearch como índices |
-| Conversation | chats, mensajes, presencia y WebRTC signaling | PostgreSQL, Socket.IO, Redis adapter |
-| Trust & Safety | reportes, strikes, reglas y auditoría | PostgreSQL, cola de revisión, almacenamiento de evidencia |
-| Notifications | preferencias y entrega in-app/push/email | PostgreSQL, BullMQ |
-| Administration | RBAC, feature flags, operaciones auditables | PostgreSQL con políticas administrativas separadas |
+| Auth | Registro, verificación de correo, login, reset/cambio de contraseña, JWT, refresh rotation, sesiones y revocación | PostgreSQL, Redis, SMTP |
+| Social | Feed con cursor, publicación y edición, borrado lógico, perfiles, privacidad, follows, reacciones, comentarios, bookmarks | PostgreSQL, S3 |
+| Media | Verificación de MIME y firma, optimización WebP, metadatos y URL temporal | PostgreSQL, Sharp, S3 |
+| Database | Pool, transacciones y migraciones con advisory lock | PostgreSQL |
+| Cache | Ping, caché de sesión y rate limit incremental | Redis |
+| Storage | Gestión de bucket, objeto y URL firmada | S3/MinIO |
 
-Cada módulo debe definir sus comandos, consultas, eventos, invariantes y propietario de datos. No compartir escrituras directas entre servicios futuros.
+Cada escritura se valida en DTOs, aplica ownership/visibilidad en servidor y genera auditoría para operaciones sensibles. No se confía en flags de interfaz para privacidad.
 
-## Modelo de datos inicial
+## Persistencia
 
-La migración `001_initial_schema.sql` define usuarios, perfiles, follows, medios, posts, relación post-media, reacciones, comentarios, bookmarks, devices, sessions y audit logs. Incluye claves foráneas, restricciones e índices de lectura básicos.
+Migraciones en orden numérico:
 
-Para crecimiento real:
+1. Identidad, perfiles, follows, publicaciones, medios, reacciones, comentarios, bookmarks, devices, sessions y auditoría.
+2. Contenido de seed sin credenciales de acceso.
+3. Tokens de verificación/reset, metadatos de sesión, soft delete y outbox de correo.
+4. Email normalizado a `VARCHAR` con unicidad case-insensitive para correo entre PostgreSQL y el adaptador PGlite de tests.
+5. Estado de procesamiento exclusivo para concluir una carga multimedia firmada de forma idempotente.
 
-- usar migraciones numeradas inmutables y ejecutar cambios expansivos/contractivos;
-- diseñar feeds con cursor (`published_at`, `id`) en vez de `OFFSET`;
-- no mantener contadores de likes en transacciones calientes sin estrategia de consistencia;
-- particionar tablas de eventos/auditoría solo después de medir volumen y retención;
-- aplicar políticas de retención, borrado y exportación con evidencia verificable;
-- cifrar o tokenizar los datos sensibles según clasificación y amenaza.
+Las relaciones usan claves foráneas, restricciones de dominio e índices de lectura. Los posts conservan `deleted_at`; las consultas sociales excluyen contenido borrado y aplican privacidad del perfil y de publicación. Las migraciones se serializan con advisory lock para que réplicas simultáneas no las ejecuten a la vez.
 
-La migración inicial es un modelo de arranque, no el esquema completo de pagos, roles, stories, streams ni mensajes.
+## Identidad y seguridad
 
-## API y límites de confianza
+- Argon2id para contraseñas; JWT HS256 de vida corta para acceso.
+- Refresh aleatorio almacenado como hash, rotación atómica y cookie `HttpOnly`, `SameSite=Strict`, `Secure` en producción.
+- El guard comprueba estado de sesión/usuario en PostgreSQL y guarda autorización por 15 segundos en Redis; logout, reset y revocación eliminan la clave de caché.
+- Validación de entrada con `class-validator`; DTOs desconocidos rechazados.
+- Helmet, CORS limitado a `FRONTEND_URL`, rate limit Redis (más estricto en rutas de credenciales), logging estructurado con headers sensibles redactados y respuesta global normalizada.
+- Imágenes se limitan, validan por firma y se re-encodean a WebP; los metadatos se guardan en PostgreSQL y el contenido en almacenamiento S3.
 
-- REST inicial en `/api/v1`; OpenAPI en `/docs`.
-- Validar DTOs en la frontera con `class-validator`, rechazar campos desconocidos y convertir tipos solo de forma explícita.
-- Autenticar y autorizar cada recurso antes de añadir mutaciones de usuario.
-- Mantener cookies seguras `HttpOnly`, `Secure`, `SameSite` y protección CSRF si la sesión se basa en cookies.
-- Los CORS/Helmet configurados son una capa básica, no sustituyen WAF, rate limiting, CSP, autorización ni hardening operativo.
-- Versionar cambios de contrato y probar compatibilidad de clientes.
+Los secretos de producción deben provenir de un secret manager. TLS, WAF, CDN, backups cifrados, alertas y respuesta a incidentes pertenecen a la configuración del proveedor/deployment.
 
-## Escala: transición condicionada por métricas
+## API y frontend
 
-```text
-Fase A: monolito modular + PostgreSQL
-Fase B: Redis, outbox transaccional, BullMQ y S3 para operaciones asíncronas
-Fase C: OpenSearch / proyecciones cuando las consultas y el volumen lo justifiquen
-Fase D: extraer servicios con ownership de datos y contratos/eventos versionados
-Fase E: múltiples regiones únicamente tras definir consistencia, residencia de datos y recuperación
-```
+OpenAPI/Swagger se expone en `/docs`. El frontend mantiene access token en memoria, usa refresh cookie en reload y renueva access tokens ante 401. React Query gestiona sincronización e invalidación; Zustand mantiene el estado de sesión y navegación. Las URL de API y storage visibles al navegador deben ser accesibles desde el cliente.
 
-El patrón outbox evita perder eventos entre una transacción SQL y una cola. El feed inicialmente puede combinar lecturas por seguidores y ranking; fan-out híbrido debe derivarse de benchmarks y evitar una copia descontrolada de publicaciones.
+## Escala y capacidades
 
-## Disponibilidad y observabilidad objetivo
+PostgreSQL, Redis y S3 se externalizan y pueden operar detrás de balanceadores; la API no mantiene estado de sesión local. El feed actual usa consultas relacionales indexadas con paginación por cursor. Su capacidad debe medirse con datos, hardware, CDN y patrones de distribución representativos antes de fijar objetivos de usuarios o disponibilidad.
 
-- SLIs por ruta: latencia p50/p95/p99, tasa de errores, saturación, colas y disponibilidad.
-- Trazas correlacionadas con IDs de solicitud; logs estructurados con redacción de datos sensibles.
-- Prometheus/Grafana y Loki se incorporarán con métricas y alertas accionables, almacenamiento/retención definidos y runbooks.
-- Backups cifrados, restauraciones ensayadas, objetivos RPO/RTO y plan de respuesta a incidentes.
-- Escalado horizontal requiere estado externo, sesiones adecuadas, balanceo, readiness/liveness y límites de recursos.
+Mensajería Socket.IO, streaming WebRTC, stories, búsqueda OpenSearch, colas BullMQ, moderación automatizada, administración RBAC, analítica y despliegue Kubernetes no forman parte del camino HTTP implementado en este repositorio. Requerirán ownership de dominio, políticas de privacidad, eventos idempotentes, métricas y sus propias pruebas cuando se incorporen.
 
-Estos componentes aún no están configurados en este repositorio.
+## Verificación
 
-## Roadmap técnico y puertas de salida
-
-### v1 — Base de producto segura
-
-- Implementar flujos de registro, Argon2id, access/refresh tokens rotables, OAuth, MFA y revocación de sesiones.
-- API persistente para perfiles, follow, publicaciones, reacciones y feed paginado.
-- Carga directa de medios mediante URLs firmadas, límites por tipo/tamaño, antivirus/moderación y procesamiento asíncrono.
-- Privacidad, reportes, RBAC, exportación/borrado y registro de auditoría.
-- Gate: pruebas unitarias/integración/E2E, threat model, revisión externa y objetivos de disponibilidad.
-
-### v2 — Comunidad y señales
-
-- Mensajería y presencia Socket.IO horizontal con Redis adapter; retención, autorización y controles antiabuso.
-- Notificaciones con preferencias, BullMQ, proveedores con reintentos idempotentes y DLQ.
-- OpenSearch para búsquedas; feed basado en señales observables y experimentación controlada.
-- Prometheus/Grafana/Loki, alertas, playbooks y pruebas de capacidad.
-- Gate: p95, recuperación de fallos, backpressure y políticas de privacidad verificadas.
-
-### v3 — Escala y ecosistema
-
-- Streaming, comunidades avanzadas, pagos/suscripciones e integraciones de creadores.
-- Separar servicios solo al demostrar límites de escalado u ownership; eventos con schema registry y outbox.
-- Kubernetes, despliegues canary, autoscaling y estrategia multi-región según requisitos legales.
-- Recomendaciones ML con evaluación de sesgo, controles de usuario y métricas de calidad.
-- Gate: carga representativa, DR multi-región ensayado, auditoría de seguridad y cumplimiento independiente.
+La suite de integración utiliza PGlite con protocolo PostgreSQL y S3rver para probar migraciones, autenticación, persistencia social y medios sin servicios remotos. Redis se sustituye por un fake dentro de E2E; el stack real de Redis y la disponibilidad de todos los contenedores se validan en Docker Compose/CI. Las pruebas locales no sustituyen pruebas de carga ni auditorías externas.

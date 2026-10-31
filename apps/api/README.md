@@ -1,5 +1,7 @@
 # NEXA API
 
-API NestJS versionada bajo `/api/v1`. Swagger está disponible en `/docs` y `GET /api/v1/health` comprueba la disponibilidad del proceso.
+Servicio NestJS/TypeScript con rutas REST `/api/v1`, PostgreSQL, Redis, S3/MinIO, Swagger `/docs`, validación global, Helmet, Pino y límites distribuidos de tráfico.
 
-Para instalar, ejecutar, probar o desplegar el monorepo, consulta la [guía principal](../../README.md). El servicio todavía no persiste datos ni implementa autenticación.
+Las migraciones numeradas están en `migrations/`; el servicio las ejecuta bajo advisory lock de PostgreSQL. Arranque desde la raíz con `npm run dev:api`, o `npm run build:api` para producción.
+
+La configuración se valida con Zod. Consulta la tabla de variables y los endpoints en la [guía del monorepo](../../README.md). En producción se requieren credenciales externas gestionadas y un servidor SMTP.

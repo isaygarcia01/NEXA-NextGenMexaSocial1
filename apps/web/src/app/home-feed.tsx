@@ -3,7 +3,6 @@
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Bookmark,
-  Check,
   ChevronDown,
   Compass,
   Ellipsis,
@@ -23,11 +22,13 @@ import {
   UsersRound,
   X,
 } from "lucide-react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import Image from "next/image";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useNexaStore } from "@/store/nexa-store";
+import { apiRequest, refreshAccessToken } from "@/lib/api";
+import { AuthScreen } from "@/components/auth-screen";
 
 const stories = [
   { name: "Tu historia", image: "photo-1534528741775-53994a69daeb", own: true },
@@ -37,40 +38,33 @@ const stories = [
   { name: "ines.vale", image: "photo-1534751516642-a1af1ef26a56", unseen: true },
   { name: "casa.verde", image: "photo-1441986300917-64674bd600d8", unseen: true },
 ];
+const suggestedPeople = [
+  ["sofia.rios", "Sofía Ríos", "Fotografía & viajes lentos", "photo-1534751516642-a1af1ef26a56"],
+  ["marcelo", "Marcelo Vega", "Diseño independiente", "photo-1500648767791-00dcc994a43e"],
+] as const;
 
-const initialPosts = [
-  {
-    id: 1,
-    name: "sofia.rios",
-    displayName: "Sofía Ríos",
-    location: "Oaxaca, México",
-    avatar: "photo-1531123897727-8f129e1688ce",
-    image: "photo-1518837695005-2083093ee35b",
-    caption: "Hay lugares que te enseñan a bajar el ritmo. Este rincón del Pacífico se quedó conmigo. 🌊",
-    likes: 2486,
-    comments: 38,
-    time: "hace 24 min",
-    liked: false,
-    saved: false,
-    tags: ["viajes", "oaxaca"],
-  },
-  {
-    id: 2,
-    name: "marcelo",
-    displayName: "Marcelo Vega",
-    location: "Estudio / Ciudad de México",
-    avatar: "photo-1500648767791-00dcc994a43e",
-    image: "photo-1494438639946-1ebd1d20bf85",
-    caption: "Luz de las seis, café recién hecho y una idea que por fin encuentra su forma.",
-    likes: 930,
-    comments: 21,
-    time: "hace 1 h",
-    liked: true,
-    saved: false,
-    tags: ["enelestudio"],
-  },
-];
-type FeedPost = (typeof initialPosts)[number];
+type FeedPost = {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  body: string;
+  publishedAt: string;
+  likeCount: number;
+  commentCount: number;
+  liked: boolean;
+  bookmarked: boolean;
+  mediaUrl: string | null;
+};
+type UserProfile = {
+  username: string;
+  displayName: string;
+  avatarUrl: string | null;
+  bio: string | null;
+  location: string | null;
+  websiteUrl: string | null;
+  isPrivate: boolean;
+};
 
 const trends = [
   { tag: "#ciudadlenta", posts: "2.4 mil publicaciones", category: "COMUNIDAD" },
@@ -95,60 +89,197 @@ export default function HomeFeed() {
   const [isComposerOpen, setIsComposerOpen] = useState(false);
   const [draft, setDraft] = useState("");
   const [notice, setNotice] = useState("");
-  const [following, setFollowing] = useState<string[]>([]);
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [commentPostId, setCommentPostId] = useState<string | null>(null);
+  const [commentDraft, setCommentDraft] = useState("");
+  const [authLoading, setAuthLoading] = useState(true);
+  const [profileEditorOpen, setProfileEditorOpen] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [profileDraft, setProfileDraft] = useState({ displayName: "", bio: "", location: "", websiteUrl: "", isPrivate: false });
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
   const activeFeed = useNexaStore((state) => state.activeFeed);
   const setActiveFeed = useNexaStore((state) => state.setActiveFeed);
+  const accessToken = useNexaStore((state) => state.accessToken);
+  const user = useNexaStore((state) => state.user);
+  const setAuth = useNexaStore((state) => state.setAuth);
+  const clearAuth = useNexaStore((state) => state.clearAuth);
   const queryClient = useQueryClient();
+  const authAttempted = useRef(false);
   const feedQueryKey = ["feed", activeFeed] as const;
-  const { data: posts = initialPosts } = useQuery<FeedPost[]>({
-    queryKey: feedQueryKey,
-    queryFn: async () => initialPosts,
-    initialData: initialPosts,
-  });
+  useEffect(() => {
+    if (authAttempted.current) return;
+    authAttempted.current = true;
+    void refreshAccessToken()
+      .then((result) => setAuth(result.accessToken, result.user))
+      .catch(() => clearAuth())
+      .finally(() => setAuthLoading(false));
+  }, [clearAuth, setAuth]);
 
-  function togglePost(id: number, field: "liked" | "saved") {
-    queryClient.setQueryData<FeedPost[]>(feedQueryKey, (current = initialPosts) =>
-      current.map((post) =>
-        post.id === id
-          ? {
-              ...post,
-              [field]: !post[field],
-              ...(field === "liked"
-                ? { likes: post.likes + (post.liked ? -1 : 1) }
-                : {}),
-            }
-          : post,
-      ),
-    );
+  const { data: feed, isLoading: postsLoading, isError: feedError, refetch } = useQuery<{ items: FeedPost[] }>({
+    queryKey: feedQueryKey,
+    queryFn: async () => {
+      if (activeFeed === "Guardados") {
+        const bookmarks = await apiRequest<Omit<FeedPost, "avatarUrl" | "commentCount" | "liked" | "bookmarked">[]>(
+          "/bookmarks",
+          {},
+          accessToken,
+        );
+        return {
+          items: bookmarks.map((post) => ({
+            ...post,
+            avatarUrl: null,
+            commentCount: 0,
+            liked: false,
+            bookmarked: true,
+          })),
+        };
+      }
+      return apiRequest(
+        `/posts?limit=25${activeFeed === "Siguiendo" ? "&feed=following" : ""}`,
+        {},
+        accessToken,
+      );
+    },
+    enabled: Boolean(accessToken),
+  });
+  const suggestionProfiles = useQueries({
+    queries: suggestedPeople.map(([handle]) => ({
+      queryKey: ["profile", handle],
+      queryFn: () => apiRequest<{ viewerFollows: boolean }>(`/users/${handle}`, {}, accessToken),
+      enabled: Boolean(accessToken),
+    })),
+  });
+  const { data: profile } = useQuery<UserProfile>({
+    queryKey: ["profile", "me"],
+    queryFn: () => apiRequest("/profiles/me", {}, accessToken),
+    enabled: Boolean(accessToken),
+  });
+  const commentsQuery = useQuery<{ id: string; body: string; username: string }[]>({
+    queryKey: ["comments", commentPostId],
+    queryFn: () => apiRequest(`/posts/${commentPostId}/comments`, {}, accessToken),
+    enabled: Boolean(commentPostId && accessToken),
+  });
+  const sessionsQuery = useQuery<{
+    id: string;
+    isCurrent: boolean;
+    userAgent: string | null;
+    ipAddress: string | null;
+    createdAt: string;
+    lastSeenAt: string | null;
+  }[]>({
+    queryKey: ["sessions"],
+    queryFn: () => apiRequest("/auth/sessions", {}, accessToken),
+    enabled: Boolean(accessToken && sessionsOpen),
+  });
+  const posts = feed?.items ?? [];
+
+  async function togglePost(post: FeedPost, field: "liked" | "saved") {
+    try {
+      await apiRequest(
+        field === "liked" ? `/posts/${post.id}/like` : `/posts/${post.id}/bookmark`,
+        { method: "POST" },
+        accessToken,
+      );
+      await queryClient.invalidateQueries({ queryKey: ["feed"] });
+      setNotice(field === "liked" ? "Me gusta actualizado." : "Guardado actualizado.");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "No se pudo actualizar la publicación.");
+    }
   }
 
-  function createPost(event: FormEvent<HTMLFormElement>) {
+  async function createPost(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const text = draft.trim();
-    if (!text) return;
-    queryClient.setQueryData<FeedPost[]>(feedQueryKey, (current = initialPosts) => [
-      {
-        id: current.reduce((maxId, post) => Math.max(maxId, post.id), 0) + 1,
-        name: "tu.perfil",
-        displayName: "Tu perfil",
-        location: "Ahora",
-        avatar: "photo-1534528741775-53994a69daeb",
-        image: "photo-1470770841072-f978cf4d019e",
-        caption: text,
-        likes: 0,
-        comments: 0,
-        time: "ahora",
-        liked: false,
-        saved: false,
-        tags: [],
-      },
-      ...current,
-    ]);
-    setDraft("");
-    setIsComposerOpen(false);
-    setNotice("Tu publicación se añadió al feed de demostración.");
-    window.setTimeout(() => setNotice(""), 3200);
+    if (!text || !accessToken) return;
+    try {
+      let mediaId: string | undefined;
+      if (selectedImage) {
+        const formData = new FormData();
+        formData.append("file", selectedImage);
+        const media = await apiRequest<{ id: string }>("/media/images", {
+          method: "POST",
+          body: formData,
+        }, accessToken);
+        mediaId = media.id;
+      }
+      await apiRequest("/posts", {
+        method: "POST",
+        body: JSON.stringify({ body: text, ...(mediaId ? { mediaId } : {}) }),
+      }, accessToken);
+      setDraft("");
+      setSelectedImage(null);
+      setIsComposerOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["feed"] });
+      setNotice("Tu publicación ya está en NEXA.");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "No se pudo publicar.");
+    }
   }
+
+  async function createComment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!commentPostId || !commentDraft.trim() || !accessToken) return;
+    try {
+      await apiRequest(`/posts/${commentPostId}/comments`, {
+        method: "POST",
+        body: JSON.stringify({ body: commentDraft.trim() }),
+      }, accessToken);
+      setCommentDraft("");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["comments", commentPostId] }),
+        queryClient.invalidateQueries({ queryKey: ["feed"] }),
+      ]);
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "No se pudo añadir el comentario.");
+    }
+  }
+
+  async function updateProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!accessToken) return;
+    try {
+      let avatarMediaId: string | undefined;
+      if (avatarFile) {
+        const formData = new FormData();
+        formData.append("file", avatarFile);
+        const media = await apiRequest<{ id: string }>("/media/images", {
+          method: "POST",
+          body: formData,
+        }, accessToken);
+        avatarMediaId = media.id;
+      }
+      await apiRequest("/profiles/me", {
+        method: "PATCH",
+        body: JSON.stringify({
+          ...profileDraft,
+          websiteUrl: profileDraft.websiteUrl || undefined,
+          ...(avatarMediaId ? { avatarMediaId } : {}),
+        }),
+      }, accessToken);
+      setAvatarFile(null);
+      setProfileEditorOpen(false);
+      await queryClient.invalidateQueries({ queryKey: ["profile", "me"] });
+      setNotice("Perfil actualizado.");
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "No se pudo actualizar el perfil.");
+    }
+  }
+
+  async function logout() {
+    if (!accessToken) return;
+    try {
+      await apiRequest("/auth/logout", { method: "POST" }, accessToken);
+      clearAuth();
+      queryClient.clear();
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "No se pudo cerrar la sesión.");
+    }
+  }
+
+  if (authLoading) {
+    return <main className="auth-page" aria-busy="true"><p className="eyebrow">CARGANDO TU ESPACIO…</p></main>;
+  }
+  if (!accessToken) return <AuthScreen />;
 
   return (
     <main className="app-shell">
@@ -190,11 +321,24 @@ export default function HomeFeed() {
             Explorar comunidades <ChevronDown size={14} />
           </button>
         </div>
-        <button className="profile-switcher" type="button">
-          <Image src={imageUrl("photo-1534528741775-53994a69daeb", 96)} alt="" width={96} height={96} />
-          <span className="profile-meta"><strong>valentina.m</strong><small>Cuenta personal</small></span>
-          <Ellipsis size={19} />
+        <button className="profile-switcher" onClick={() => {
+          setProfileDraft({
+            displayName: profile?.displayName ?? "",
+            bio: profile?.bio ?? "",
+            location: profile?.location ?? "",
+            websiteUrl: profile?.websiteUrl ?? "",
+            isPrivate: profile?.isPrivate ?? false,
+          });
+          setProfileEditorOpen(true);
+        }} type="button" aria-label="Editar perfil">
+          <Image src={profile?.avatarUrl ?? imageUrl("photo-1534528741775-53994a69daeb", 96)} alt="" width={96} height={96} unoptimized />
+          <span className="profile-meta"><strong>{profile?.username ?? user?.username}</strong><small>Editar perfil</small></span>
+          <Settings2 size={17} />
         </button>
+        <div className="account-actions">
+          <button type="button" onClick={() => setSessionsOpen(true)}>Sesiones activas</button>
+          <button type="button" onClick={() => void logout()}>Cerrar sesión</button>
+        </div>
       </aside>
 
       <section className="feed-column">
@@ -209,7 +353,7 @@ export default function HomeFeed() {
         <div className="feed-topbar">
           <div>
             <span className="eyebrow">TU ESPACIO</span>
-            <h1>Un poco de inspiración.</h1>
+            <h1>{activeFeed === "Siguiendo" ? "Cerca de tu círculo." : "Un poco de inspiración."}</h1>
           </div>
           <button className="icon-button settings-button" aria-label="Preferencias del feed" type="button">
             <Settings2 size={19} />
@@ -236,12 +380,12 @@ export default function HomeFeed() {
         </section>
 
         <div className="feed-tabs" role="tablist" aria-label="Tipo de feed">
-          {["Para ti", "Siguiendo", "Popular"].map((tab) => (
+          {["Para ti", "Siguiendo"].map((tab) => (
             <button
               aria-selected={activeFeed === tab || (tab === "Para ti" && activeFeed === "Inicio")}
               className={(activeFeed === tab || (tab === "Para ti" && activeFeed === "Inicio")) ? "selected" : ""}
               key={tab}
-              onClick={() => setActiveFeed(tab)}
+              onClick={() => setActiveFeed(tab === "Siguiendo" ? "Siguiendo" : "Inicio")}
               role="tab"
               type="button"
             >{tab}{tab === "Para ti" && <span className="sparkle-dot">✳</span>}</button>
@@ -251,6 +395,9 @@ export default function HomeFeed() {
 
         <div className="posts-list">
           <AnimatePresence initial={false}>
+            {postsLoading && <div className="empty-feed" aria-live="polite">Cargando publicaciones…</div>}
+            {feedError && <div className="empty-feed" role="alert">No se pudo cargar el feed. <button type="button" onClick={() => void refetch()}>Reintentar</button></div>}
+            {!postsLoading && !feedError && posts.length === 0 && <div className="empty-feed"><strong>Tu feed empieza aquí.</strong><span>Cuando tu círculo comparta algo, aparecerá en este espacio.</span></div>}
             {posts.map((post) => (
               <motion.article
                 animate={{ opacity: 1, y: 0 }}
@@ -261,30 +408,30 @@ export default function HomeFeed() {
                 transition={{ duration: 0.28 }}
               >
                 <div className="post-header">
-                  <Image className="post-avatar" src={imageUrl(post.avatar, 96)} alt="" width={96} height={96} />
+                  <Image className="post-avatar" src={post.avatarUrl ?? imageUrl("photo-1534528741775-53994a69daeb", 96)} alt="" width={96} height={96} unoptimized />
                   <div className="post-author">
-                    <div className="author-line"><strong>{post.name}</strong><span className="verified"><Check size={9} /></span><span className="post-time">· {post.time}</span></div>
-                    <span>{post.location}</span>
+                    <div className="author-line"><strong>{post.username}</strong><span className="post-time">· {new Date(post.publishedAt).toLocaleDateString("es-MX")}</span></div>
+                    <span>{post.displayName}</span>
                   </div>
                   <button className="icon-button more-button" type="button" aria-label="Más opciones"><Ellipsis size={20} /></button>
                 </div>
-                <div className="post-image-wrap">
-                  <Image className="post-image" src={imageUrl(post.image, 1200)} alt={`Publicación de ${post.displayName}`} fill sizes="(max-width: 760px) 100vw, 620px" />
-                  <span className="image-count"><Layers3 size={13} /> 1 / 4</span>
-                </div>
+                {post.mediaUrl && <div className="post-image-wrap"><Image className="post-image" src={post.mediaUrl} alt={`Publicación de ${post.displayName}`} fill sizes="(max-width: 760px) 100vw, 620px" unoptimized /></div>}
                 <div className="post-actions">
                   <div className="post-actions-left">
-                    <button aria-label={post.liked ? "Quitar me gusta" : "Me gusta"} className={`action-button ${post.liked ? "is-liked" : ""}`} onClick={() => togglePost(post.id, "liked")} type="button"><Heart size={21} fill={post.liked ? "currentColor" : "none"} /></button>
-                    <button aria-label="Comentar" className="action-button" type="button"><MessageCircle size={21} /></button>
+                    <button aria-label={post.liked ? "Quitar me gusta" : "Me gusta"} className={`action-button ${post.liked ? "is-liked" : ""}`} onClick={() => void togglePost(post, "liked")} type="button"><Heart size={21} fill={post.liked ? "currentColor" : "none"} /></button>
+                    <button aria-label="Comentar" className="action-button" onClick={() => setCommentPostId(commentPostId === post.id ? null : post.id)} type="button"><MessageCircle size={21} /></button>
                     <button aria-label="Compartir" className="action-button" type="button"><Send size={20} /></button>
                   </div>
-                  <button aria-label={post.saved ? "Quitar de guardados" : "Guardar"} className={`action-button ${post.saved ? "is-saved" : ""}`} onClick={() => togglePost(post.id, "saved")} type="button"><Bookmark size={20} fill={post.saved ? "currentColor" : "none"} /></button>
+                  <button aria-label={post.bookmarked ? "Quitar de guardados" : "Guardar"} className={`action-button ${post.bookmarked ? "is-saved" : ""}`} onClick={() => void togglePost(post, "saved")} type="button"><Bookmark size={20} fill={post.bookmarked ? "currentColor" : "none"} /></button>
                 </div>
                 <div className="post-copy">
-                  <strong className="like-count">{post.likes.toLocaleString("es-MX")} <span>me gusta</span></strong>
-                  <p><strong>{post.name}</strong> {post.caption}</p>
-                  <button className="comments-link" type="button">Ver los {post.comments} comentarios</button>
-                  <button className="comment-input" type="button" onClick={() => setNotice("Los comentarios estarán disponibles al conectar la API.")}>Añade un comentario… <Send size={14} /></button>
+                  <strong className="like-count">{post.likeCount.toLocaleString("es-MX")} <span>me gusta</span></strong>
+                  <p><strong>{post.username}</strong> {post.body}</p>
+                  <button className="comments-link" onClick={() => setCommentPostId(commentPostId === post.id ? null : post.id)} type="button">Ver los {post.commentCount} comentarios</button>
+                  {commentPostId === post.id && <div className="comments-panel">
+                    {commentsQuery.isLoading ? <span>Cargando comentarios…</span> : commentsQuery.data?.map((comment) => <p key={comment.id}><strong>{comment.username}</strong> {comment.body}</p>)}
+                    <form onSubmit={createComment}><label className="sr-only" htmlFor={`comment-${post.id}`}>Escribe un comentario</label><input id={`comment-${post.id}`} maxLength={2000} onChange={(event) => setCommentDraft(event.target.value)} placeholder="Añade un comentario…" value={commentDraft} /><button aria-label="Enviar comentario" disabled={!commentDraft.trim()} type="submit"><Send size={14} /></button></form>
+                  </div>}
                 </div>
               </motion.article>
             ))}
@@ -295,30 +442,43 @@ export default function HomeFeed() {
 
       <aside className="right-rail">
         <div className="rail-header">
-          <div className="rail-greeting"><span className="eyebrow">TU ESPACIO · CDMX</span><h2>Hola, Valentina <span>✳</span></h2></div>
-          <button className="avatar-button" type="button" aria-label="Tu perfil"><Image src={imageUrl("photo-1534528741775-53994a69daeb", 96)} alt="" width={96} height={96} /><span /></button>
+          <div className="rail-greeting"><span className="eyebrow">TU ESPACIO</span><h2>Hola, {profile?.displayName?.split(" ")[0] ?? user?.username} <span>✳</span></h2></div>
+          <button className="avatar-button" onClick={() => {
+            setProfileDraft({
+              displayName: profile?.displayName ?? "",
+              bio: profile?.bio ?? "",
+              location: profile?.location ?? "",
+              websiteUrl: profile?.websiteUrl ?? "",
+              isPrivate: profile?.isPrivate ?? false,
+            });
+            setProfileEditorOpen(true);
+          }} type="button" aria-label="Editar perfil"><Image src={profile?.avatarUrl ?? imageUrl("photo-1534528741775-53994a69daeb", 96)} alt="" width={96} height={96} unoptimized /><span /></button>
         </div>
         <div className="rail-search"><Search size={17} /><span>Buscar personas, ideas…</span><kbd>/</kbd></div>
         <section className="rail-section suggestions">
           <div className="rail-title"><div><span className="eyebrow">BUENAS CONEXIONES</span><h3>Personas para ti</h3></div><button type="button">Ver más</button></div>
-          {[
-            ["ines.vale", "Inés Valdés", "Arte & vida lenta", "photo-1534751516642-a1af1ef26a56"],
-            ["mateo.cooks", "Mateo Díaz", "Cocina de temporada", "photo-1506794778202-cad84cf45f1d"],
-            ["estudio.norte", "Estudio Norte", "Diseño independiente", "photo-1531058020387-3be344556be6"],
-          ].map(([handle, name, bio, image]) => (
+          {suggestedPeople.map(([handle, name, bio, image], index) => (
             <div className="suggestion" key={handle}>
               <Image src={imageUrl(image, 96)} alt="" width={96} height={96} />
               <div className="suggestion-meta"><strong>{handle}</strong><span>{bio}</span><small>{name}</small></div>
               <button
-                aria-pressed={following.includes(handle)}
-                className={`follow-button ${following.includes(handle) ? "following" : ""}`}
-                onClick={() => setFollowing((current) =>
-                  current.includes(handle)
-                    ? current.filter((item) => item !== handle)
-                    : [...current, handle],
-                )}
+                aria-pressed={Boolean(suggestionProfiles[index]?.data?.viewerFollows)}
+                className={`follow-button ${suggestionProfiles[index]?.data?.viewerFollows ? "following" : ""}`}
+                disabled={!suggestionProfiles[index]?.data}
+                onClick={async () => {
+                  try {
+                    const followed = suggestionProfiles[index]?.data?.viewerFollows;
+                    await apiRequest(`/users/${handle}/follow`, { method: followed ? "DELETE" : "POST" }, accessToken);
+                    await Promise.all([
+                      queryClient.invalidateQueries({ queryKey: ["profile", handle] }),
+                      queryClient.invalidateQueries({ queryKey: ["feed"] }),
+                    ]);
+                  } catch (reason) {
+                    setNotice(reason instanceof Error ? reason.message : "No se pudo actualizar el seguimiento.");
+                  }
+                }}
                 type="button"
-              >{following.includes(handle) ? "Siguiendo" : "Seguir"}</button>
+              >{suggestionProfiles[index]?.data?.viewerFollows ? "Siguiendo" : "Seguir"}</button>
             </div>
           ))}
         </section>
@@ -345,14 +505,63 @@ export default function HomeFeed() {
       </nav>
 
       <AnimatePresence>
+        {profileEditorOpen && (
+          <motion.div className="modal-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setProfileEditorOpen(false); }}>
+            <motion.form className="composer-modal settings-modal" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 12 }} onSubmit={updateProfile}>
+              <div className="modal-header"><div><span className="eyebrow">TU CUENTA</span><h2>Editar perfil</h2></div><button className="icon-button" aria-label="Cerrar" onClick={() => setProfileEditorOpen(false)} type="button"><X size={20} /></button></div>
+              <label htmlFor="profile-display-name">Nombre</label>
+              <input id="profile-display-name" maxLength={80} onChange={(event) => setProfileDraft({ ...profileDraft, displayName: event.target.value })} required value={profileDraft.displayName} />
+              <label htmlFor="profile-bio">Biografía</label>
+              <textarea id="profile-bio" maxLength={500} onChange={(event) => setProfileDraft({ ...profileDraft, bio: event.target.value })} value={profileDraft.bio} />
+              <label htmlFor="profile-location">Ubicación</label>
+              <input id="profile-location" maxLength={120} onChange={(event) => setProfileDraft({ ...profileDraft, location: event.target.value })} value={profileDraft.location} />
+              <label htmlFor="profile-website">Sitio web</label>
+              <input id="profile-website" onChange={(event) => setProfileDraft({ ...profileDraft, websiteUrl: event.target.value })} type="url" value={profileDraft.websiteUrl} />
+              <label className="profile-image-select" htmlFor="profile-image"><ImagePlus size={16} />{avatarFile?.name ?? "Cambiar foto de perfil"}</label>
+              <input accept="image/jpeg,image/png,image/webp" className="sr-only" id="profile-image" onChange={(event) => setAvatarFile(event.target.files?.[0] ?? null)} type="file" />
+              <label className="privacy-toggle"><input checked={profileDraft.isPrivate} onChange={(event) => setProfileDraft({ ...profileDraft, isPrivate: event.target.checked })} type="checkbox" /><span>Cuenta privada</span></label>
+              <button className="publish-button" type="submit">Guardar perfil</button>
+            </motion.form>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {sessionsOpen && (
+          <motion.div className="modal-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setSessionsOpen(false); }}>
+            <motion.section aria-labelledby="sessions-title" aria-modal="true" className="composer-modal sessions-modal" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 12 }} role="dialog">
+              <div className="modal-header"><div><span className="eyebrow">SEGURIDAD</span><h2 id="sessions-title">Sesiones activas</h2></div><button className="icon-button" aria-label="Cerrar" onClick={() => setSessionsOpen(false)} type="button"><X size={20} /></button></div>
+              {sessionsQuery.isLoading && <p>Cargando dispositivos…</p>}
+              {sessionsQuery.isError && <p className="auth-alert error" role="alert">No se pudieron cargar las sesiones.</p>}
+              {sessionsQuery.data?.map((session) => (
+                <article className="session-row" key={session.id}>
+                  <div><strong>{session.userAgent ?? "Dispositivo"}</strong><span>{session.ipAddress ?? "IP no disponible"} · {session.lastSeenAt ? new Date(session.lastSeenAt).toLocaleString("es-MX") : "Sin actividad"}</span></div>
+                  {session.isCurrent
+                    ? <span className="current-session">Este dispositivo</span>
+                    : <button type="button" onClick={async () => {
+                      try {
+                        await apiRequest(`/auth/sessions/${session.id}`, { method: "DELETE" }, accessToken);
+                        await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+                      } catch (reason) {
+                        setNotice(reason instanceof Error ? reason.message : "No se pudo cerrar la sesión.");
+                      }
+                    }}>Cerrar</button>}
+                </article>
+              ))}
+            </motion.section>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
         {isComposerOpen && (
           <motion.div className="modal-backdrop" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} onMouseDown={(event) => { if (event.target === event.currentTarget) setIsComposerOpen(false); }}>
             <motion.form className="composer-modal" initial={{ opacity: 0, y: 18, scale: 0.98 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 12 }} onSubmit={createPost}>
               <div className="modal-header"><div><span className="eyebrow">CREAR ALGO</span><h2>Nueva publicación</h2></div><button className="icon-button" aria-label="Cerrar" onClick={() => setIsComposerOpen(false)} type="button"><X size={20} /></button></div>
-              <textarea autoFocus maxLength={500} onChange={(event) => setDraft(event.target.value)} placeholder="¿Qué te gustaría compartir?" value={draft} />
-              <div className="composer-toolbar"><button className="media-add" type="button"><ImagePlus size={17} /><span>Añadir imágenes</span></button><span>{draft.length}/500</span></div>
+              <textarea autoFocus maxLength={5000} onChange={(event) => setDraft(event.target.value)} placeholder="¿Qué te gustaría compartir?" value={draft} />
+              <div className="composer-toolbar"><input aria-label="Seleccionar imagen" accept="image/jpeg,image/png,image/webp" className="sr-only" id="post-image" onChange={(event) => setSelectedImage(event.target.files?.[0] ?? null)} type="file" /><button className="media-add" onClick={() => document.getElementById("post-image")?.click()} type="button"><ImagePlus size={17} /><span>{selectedImage?.name ?? "Añadir imagen"}</span></button><span>{draft.length}/5000</span></div>
               <button className="publish-button" disabled={!draft.trim()} type="submit">Compartir con tu círculo <Send size={15} /></button>
-              <p className="demo-caption">Vista previa local: tu publicación no se guarda en el servidor.</p>
+              {selectedImage && <p className="demo-caption">La imagen se optimizará y almacenará de forma segura.</p>}
             </motion.form>
           </motion.div>
         )}

@@ -1,9 +1,6 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS citext;
-
 CREATE TABLE users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email CITEXT NOT NULL UNIQUE,
+  email VARCHAR(320) NOT NULL,
   username VARCHAR(30) NOT NULL UNIQUE,
   password_hash TEXT,
   status VARCHAR(16) NOT NULL DEFAULT 'active'
@@ -12,6 +9,7 @@ CREATE TABLE users (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   deleted_at TIMESTAMPTZ
 );
+CREATE UNIQUE INDEX users_email_lower_idx ON users (lower(email));
 
 CREATE TABLE profiles (
   user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -48,7 +46,7 @@ CREATE TABLE media (
   height INTEGER,
   duration_ms INTEGER,
   processing_status VARCHAR(16) NOT NULL DEFAULT 'pending'
-    CHECK (processing_status IN ('pending', 'ready', 'rejected', 'failed')),
+    CHECK (processing_status IN ('pending', 'processing', 'ready', 'rejected', 'failed')),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX media_owner_created_idx ON media (owner_id, created_at DESC);

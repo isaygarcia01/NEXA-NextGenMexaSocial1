@@ -1,11 +1,17 @@
 import { defineConfig } from 'vitest/config';
-import tsconfigPaths from 'vite-tsconfig-paths';
 
 export default defineConfig({
-  plugins: [tsconfigPaths()],
+  resolve: { tsconfigPaths: true },
   test: {
     globals: true,
     root: './',
-    include: ['**/*.e2e-spec.ts'],
+    include: ['**/*.spec.ts', '**/*.e2e-spec.ts'],
+    hookTimeout: 120_000,
+    testTimeout: 120_000,
+    coverage: {
+      include: ['src/**/*.ts'],
+      exclude: ['src/**/*.spec.ts', 'src/main.ts'],
+      reporter: ['text', 'lcov'],
+    },
   },
 });

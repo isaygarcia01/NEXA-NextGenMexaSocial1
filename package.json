@@ -9,6 +9,10 @@
   "scripts": {
     "dev:web": "npm --prefix apps/web run dev",
     "dev:api": "npm --prefix apps/api run start:dev",
+    "lint": "npm run lint:api && npm run lint:web",
+    "build": "npm run build:api && npm run build:web",
+    "test": "npm run test:api",
+    "test:coverage": "npm --prefix apps/api run test:coverage:e2e",
     "build:web": "npm --prefix apps/web run build",
     "build:api": "npm --prefix apps/api run build",
     "test:api": "npm --prefix apps/api run test",

@@ -1,29 +1,38 @@
 # NEXA
 
-NEXA es el punto de partida de una plataforma social visual-first: un espacio sobrio para compartir trabajo creativo, intereses y comunidades, sin competir con el contenido de las personas.
+NEXA es una plataforma social visual-first con una interfaz oscura, acceso seguro, perfiles, publicaciones, interacciones y almacenamiento multimedia. El repositorio está organizado como monolito modular para mantener transacciones y autorización consistentes; los servicios externos se pueden escalar horizontalmente.
 
-> **Estado del proyecto:** prototipo funcional y base de arquitectura, no producto listo para producción. La interfaz incluye datos de demostración en memoria; la API ofrece salud y documentación; PostgreSQL, Redis y MinIO se provisionan localmente, pero todavía no están conectados a los casos de uso de la aplicación.
+## Arquitectura
 
-## Qué está implementado
+```text
+apps/
+  web/                 Next.js App Router, React, TypeScript, Tailwind, Framer Motion
+    src/app/           Feed, autenticación, perfil y estilos
+    src/components/    Formularios y provider de React Query
+    src/lib/            Cliente HTTP con refresh automático
+    src/store/          Sesión en memoria y navegación con Zustand
+  api/                 NestJS REST versionado /api/v1
+    src/auth/           Argon2id, access JWT, refresh rotatorio, sesiones, correo
+    src/social/         Feed cursor, posts, perfiles, follows, likes, comentarios, bookmarks
+    src/media/          Validación, optimización WebP y URLs firmadas
+    src/database/       Pool PostgreSQL y migraciones con lock distribuido
+    src/cache/          Redis y límites de tráfico
+    src/storage/        S3/MinIO
+    migrations/         Migraciones 001–005 y seed inicial
+infra/                 Recursos auxiliares de PostgreSQL
+docs/                  Diseño y decisiones de arquitectura
+.github/workflows/     Lint, tests, builds y build de contenedores
+docker-compose.yml     Web, API, PostgreSQL, Redis y MinIO
+```
 
-- Feed adaptable en español con círculos, sugerencias y temas.
-- Interacciones locales para me gusta, guardar, seguir y crear una publicación de demostración.
-- Tokens CSS, tema oscuro, estados accesibles y navegación móvil.
-- Next.js + React + TypeScript; Framer Motion, Zustand y React Query instalados.
-- API NestJS con prefijo `/api/v1`, Helmet, CORS configurable y Swagger.
-- Endpoint `GET /api/v1/health`.
-- Esquema inicial PostgreSQL para cuentas, perfiles, relaciones, publicaciones, medios, reacciones, comentarios, sesiones y auditoría.
-- Docker Compose de desarrollo para web, API, PostgreSQL, Redis y MinIO.
-- Workflow de CI con lint, pruebas del API y builds.
-
-Las interacciones del navegador se reinician al recargar la página. No hay autenticación, escritura de datos, OAuth, cargas multimedia, mensajería, moderación ni controles de administración implementados todavía.
+La API aplica validación estricta de DTO, Helmet, CORS configurable, Swagger (`/docs`), logs Pino con redacción de credenciales, filtro global de errores y health checks de PostgreSQL, Redis y S3. Las mutaciones sociales y de cuenta escriben eventos de auditoría. El feed usa cursor estable por fecha e ID; los datos multimedia se guardan en S3 compatible, no en la base.
 
 ## Requisitos
 
-- Node.js 24.15 o superior y npm.
-- Docker Desktop y Docker Compose v2 para ejecutar el entorno completo.
+- Node.js 24.15+ y npm.
+- Docker Desktop con Docker Compose v2 para el stack local integrado.
 
-## Inicio rápido: entorno completo
+## Inicio local con Docker
 
 En PowerShell, desde la raíz:
 
@@ -32,6 +41,8 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
+URLs:
+
 - Web: <http://localhost:3000>
 - API: <http://localhost:3001/api/v1>
 - Swagger: <http://localhost:3001/docs>
@@ -39,76 +50,71 @@ docker compose up --build
 - Redis: `localhost:6379`
 - MinIO API / consola: <http://localhost:9000> / <http://localhost:9001>
 
-La primera inicialización de PostgreSQL aplica los SQL de `infra/postgres/migrations` en orden y añade las cuentas de ejemplo sin credenciales.
+La API aplica las migraciones incluidas en `apps/api/migrations` al iniciar y espera a que PostgreSQL, Redis y MinIO estén disponibles. La migración `002_seed_demo.sql` crea publicaciones de muestra; las cuentas de seed no tienen credenciales.
 
 ## Desarrollo sin Docker
 
-Instala dependencias en cada aplicación:
+Instala dependencias en cada app y configura `DATABASE_URL`, `REDIS_URL`, `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`, `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `JWT_ACCESS_SECRET` y `FRONTEND_URL` para servicios locales accesibles:
 
 ```powershell
-Set-Location apps\web
-npm ci
-npm run dev
+npm --prefix apps\api ci
+npm --prefix apps\web ci
+npm run dev:api
 ```
 
 En otra terminal, desde la raíz:
 
 ```powershell
-Set-Location apps\api
-npm ci
-npm run start:dev
+npm run dev:web
 ```
 
-El API inicia en el puerto `3001`. La web puede abrirse sin el API; el feed actual usa datos de demostración locales.
+`NEXT_PUBLIC_API_URL` permite definir el endpoint HTTP de la API. El valor predeterminado es `http://localhost:3001/api/v1`.
 
-## Comandos
+## Comandos de validación
 
-Desde la raíz del proyecto:
+Desde la raíz:
 
 ```powershell
-npm run dev:web
-npm run dev:api
-npm run lint:web
-npm run lint:api
-npm run test:api
-npm run build:web
-npm run build:api
+npm run lint
+npm run build
+npm test
+npm run test:e2e
+npm run test:coverage
 ```
 
-## Estructura
+Las pruebas E2E ejecutan PostgreSQL embebido PGlite y S3 compatible S3rver; Redis se reemplaza por un fake aislado en esa suite. Para probar Redis de producción, usa el servicio de Docker Compose. Las pruebas cubren registro/verificación, login, refresh rotation, revocación por cambio de contraseña, feed, posts, comentarios, reacciones, follows, perfil privado, sesiones y carga/descarga de imágenes.
 
-```text
-apps/
-  api/                 NestJS; entrada HTTP y documentación OpenAPI
-  web/                 Next.js App Router; feed y sistema visual
-infra/
-  postgres/migrations/ Esquema SQL y datos de demostración
-.github/workflows/     CI de frontend y API
-docker-compose.yml     Servicios locales
-docs/                  Arquitectura, límites y roadmap
-```
+## Variables de entorno
 
-## Decisiones de arquitectura
+| Variable | Propósito | Local |
+|---|---|---|
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` | Base PostgreSQL | valores de `.env.example` |
+| `REDIS_PASSWORD` | Autenticación Redis | valor de `.env.example` |
+| `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD` | Credenciales MinIO | valores de `.env.example` |
+| `DATABASE_URL` | Conexión PostgreSQL de la API | lo genera Compose |
+| `REDIS_URL` | Conexión Redis de la API | lo genera Compose |
+| `S3_ENDPOINT`, `S3_PUBLIC_ENDPOINT`, `S3_PUBLIC_URL` | Conexiones privada/pública S3 | API MinIO local |
+| `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | Bucket y credenciales S3 | valores de `.env.example` |
+| `JWT_ACCESS_SECRET` | Firma de access JWT (mínimo 32 caracteres) | secreto local del ejemplo |
+| `ACCESS_TOKEN_TTL_SECONDS`, `REFRESH_TOKEN_TTL_DAYS` | Duración de tokens | 900 s / 30 días |
+| `FRONTEND_URL`, `PORT`, `TRUST_PROXY` | CORS, puerto y proxy confiable | defaults locales |
+| `MAX_UPLOAD_BYTES` | Límite de imagen | 10 MB |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | Envío de verificación y recuperación | opcional en desarrollo, obligatorio en producción |
+| `NEXT_PUBLIC_API_URL` | URL del API visible desde navegador | `http://localhost:3001/api/v1` |
 
-Se comienza con un **monolito modular** y contratos HTTP versionados. Es una elección deliberada: antes de distribuir servicios conviene validar producto, límites de dominio, privacidad y volumen real. La arquitectura objetivo y las condiciones para separar servicios están en [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
+En producción reemplaza las credenciales locales, configura TLS/gestión de secretos y SMTP real. No publiques los defaults de desarrollo.
 
-## Seguridad y puesta en producción
+## Endpoints disponibles
 
-Los valores de `.env.example` son exclusivamente locales. No publicar este Compose como entorno productivo ni exponer sus puertos directamente a Internet. Antes de un despliegue real hacen falta, como mínimo:
+- Auth: `POST /auth/register`, `/auth/login`, `/auth/logout`, `/auth/refresh`, `/auth/verify-email`, `/auth/resend-verification`, `/auth/forgot-password`, `/auth/reset-password`, `/auth/change-password`, `GET /auth/sessions`, `DELETE /auth/sessions/:sessionId`.
+- Social: `GET/POST /posts`, `PATCH/DELETE /posts/:postId`, `POST /posts/:postId/like`, `GET/POST /posts/:postId/comments`, `POST /posts/:postId/bookmark`, `GET /bookmarks`, `GET/PATCH /profiles/me`, `GET /users/:username`, `GET /users/:username/posts`, `POST/DELETE /users/:username/follow`.
+- Media: `POST /media/images`, `GET /media/upload-url`, `POST /media/:mediaId/complete`, `GET /media/:mediaId/url`.
+- Plataforma: `GET /health`, `GET /health/live`, OpenAPI en `/docs`.
 
-- identidad implementada y probada (Argon2id, sesiones revocables, rotación de refresh tokens, MFA y OAuth);
-- autorización por recurso, límites de tráfico y protección antiabuso;
-- migraciones versionadas con herramienta de migraciones y política de backup/restore;
-- almacenamiento privado con URLs firmadas, análisis y límites de archivos;
-- gestión de secretos, TLS, políticas de red, observabilidad, alertas y respuesta a incidentes;
-- pruebas de integración, E2E, seguridad, accesibilidad y carga; revisión de privacidad y asesoría legal para GDPR/CCPA/LGPD.
+Todos los endpoints de negocio se prefijan con `/api/v1`. La documentación OpenAPI generada en runtime es la fuente contractual vigente.
 
-La tabla de entidades de sesiones no implica que la autenticación esté activa: el backend aún no crea ni valida sesiones. Las imágenes de muestra cargan directamente desde Unsplash, no se guardan en S3 y requieren Internet; deben sustituirse por un pipeline de medios propio antes de producción.
+## Seguridad operativa
 
-## Roadmap
+Los access tokens JWT duran 15 minutos por defecto; el refresh token se almacena como hash en PostgreSQL, se rota en cada uso y se entrega en cookie `HttpOnly`, `SameSite=Strict`, `Secure` en producción. Las sesiones revocadas invalidan el guard y su caché Redis. Las imágenes aceptadas son JPEG, PNG y WebP, se verifican por firma y se convierten a WebP con Sharp. Las URLs de lectura y carga son temporales.
 
-- **v1 — Fundamentos sociales:** cuentas y sesiones seguras, perfiles, publicaciones persistentes, follows, feed paginado, medios privados, reportes y panel básico de moderación.
-- **v2 — Comunidad y tiempo real:** mensajes y presencia con Socket.IO, notificaciones, búsqueda, colas BullMQ, pipeline multimedia, Redis y métricas de producto.
-- **v3 — Escala y monetización:** feed híbrido por eventos, servicios separados según métricas, recomendaciones, directos, pagos, Kubernetes, SLOs y expansión multi-región.
-
-Cada fase requiere criterios de aceptación, pruebas y revisión de seguridad propios. No se garantiza una capacidad de millones de usuarios hasta medir cargas representativas y probar la arquitectura desplegada.
+La suite de integración no sustituye pruebas de carga, pentest ni restauración de backups. La capacidad real depende de sizing, CDN, proveedores y operación del entorno desplegado; no se afirma un límite de millones de usuarios sin medirlo.
